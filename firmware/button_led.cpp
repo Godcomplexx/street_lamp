@@ -2,6 +2,7 @@
 // does not work (see VALIDATION.md).
 //   short press  -> next color (on release)
 //   hold         -> brightness ramps; each new hold reverses the direction
+//   wheel        -> brightness up / down, one step per notch
 // Color and brightness survive power loss.
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
@@ -9,6 +10,11 @@
 
 constexpr uint8_t LED_PIN = 5;
 constexpr uint8_t BUTTON_PIN = 4;
+// Three-contact mouse wheel: A and B to these pins, common contact to GND.
+// If scrolling "up" dims the light, swap the A and B wires.
+constexpr uint8_t WHEEL_A_PIN = 6;
+constexpr uint8_t WHEEL_B_PIN = 7;
+constexpr uint32_t WHEEL_DEBOUNCE_MS = 12;
 constexpr uint32_t DEBOUNCE_MS = 20;
 constexpr uint32_t HOLD_MS = 400;        // longer than this is a hold, not a press
 constexpr uint32_t RAMP_STEP_MS = 20;
@@ -42,6 +48,11 @@ bool holding = false;
 bool saveNeeded = false;
 uint32_t lastEditMs = 0;
 
+uint8_t wheelRaw = 0;        // last sampled A/B levels (bit1 = A, bit0 = B)
+uint8_t wheelStable = 0;     // last accepted A/B state
+uint32_t wheelChangedMs = 0;
+int wheelPosition = 0;       // for diagnostics only
+
 void showColor() {
   const uint8_t *rgb = colors[colorIndex];
   led.setPixelColor(0, (uint16_t(rgb[0]) * brightness + 127) / 255,
@@ -67,10 +78,60 @@ void rampBrightness(uint32_t now) {
   }
 }
 
+uint8_t readWheel() {
+  return uint8_t((digitalRead(WHEEL_A_PIN) << 1) | digitalRead(WHEEL_B_PIN));
+}
+
+// A mouse wheel is not a regular quadrature encoder: it cycles through three
+// states, 10 -> 11 -> 01 -> 10, one per notch (00 never rests), and the
+// 01 -> 10 step flips both contacts at once. Index: (accepted << 2) | new.
+const int8_t wheelSteps[16] = {
+  0, 0, 0, 0,
+  0, 0, 1, -1,
+  0, -1, 0, 1,
+  0, 1, -1, 0,
+};
+
+void pollWheel(uint32_t now) {
+  const uint8_t sample = readWheel();
+  if (sample != wheelRaw) {
+    wheelRaw = sample;
+    wheelChangedMs = now;
+  }
+  if (wheelRaw == wheelStable || wheelRaw == 0 || now - wheelChangedMs < WHEEL_DEBOUNCE_MS) return;
+  const int step = wheelSteps[(wheelStable << 2) | wheelRaw];
+  wheelStable = wheelRaw;
+  if (step == 0) return;
+  wheelPosition += step;
+  // One notch changes brightness by about a fifth: ~25 notches from dim to full.
+  const int level = step > 0 ? min(255, brightness + max(1, brightness / 5))
+                             : max(int(MIN_BRIGHTNESS), brightness - max(1, brightness / 6));
+  if (level != brightness) {
+    brightness = uint8_t(level);
+    edited(now);
+  }
+}
+
+#if LED_DIAGNOSTICS
+// Send 'r' over USB serial for the current wheel state.
+void diagnosticsLoop() {
+  if (!Serial.available() || Serial.read() != 'r') return;
+  Serial.printf("DIAG wheel_ab=%u%u position=%d brightness=%u color=%u\n",
+    (wheelStable >> 1) & 1, wheelStable & 1, wheelPosition, brightness, unsigned(colorIndex));
+}
+#endif
+
 void setup() {
   // Nothing here needs full speed; a slower CPU keeps the chip cooler.
   setCpuFrequencyMhz(80);
+#if LED_DIAGNOSTICS
+  Serial.begin(115200);
+  Serial.setTxTimeoutMs(0);
+#endif
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  pinMode(WHEEL_A_PIN, INPUT_PULLUP);
+  pinMode(WHEEL_B_PIN, INPUT_PULLUP);
+  wheelRaw = wheelStable = readWheel();
 
   settings.begin("led", false);
   colorIndex = settings.getUChar("color", 0) % COLOR_COUNT;
@@ -116,6 +177,11 @@ void loop() {
     lastRampMs = now;
     rampBrightness(now);
   }
+
+  pollWheel(now);
+#if LED_DIAGNOSTICS
+  diagnosticsLoop();
+#endif
 
   if (saveNeeded && now - lastEditMs >= SAVE_DELAY_MS) {
     settings.putUChar("color", uint8_t(colorIndex));
