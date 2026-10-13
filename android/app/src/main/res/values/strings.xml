@@ -1,0 +1,4 @@
+<resources>
+    <string name="brightness_percent">%1$d%%</string>
+    <string name="connection_status">●  %1$s</string>
+</resources>

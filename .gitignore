@@ -1,0 +1,15 @@
+# PlatformIO
+.pio/
+
+# Android / Gradle
+.gradle/
+**/build/
+local.properties
+*.apk
+
+# Python
+__pycache__/
+
+# IDE
+.vscode/
+.idea/
