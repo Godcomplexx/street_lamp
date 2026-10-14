@@ -14,7 +14,10 @@ Summary of the connectivity investigation on the development board
 
 Reproduced with Bluedroid and NimBLE, Arduino-ESP32 2.0.17 and 3.3.11,
 legacy and extended advertising, a fresh NVS / PHY calibration, and an
-open 802.11b access point created directly through `esp_wifi_*`.
+open 802.11b access point created directly through `esp_wifi_*`. The
+Bluetooth firmware and the probe builds used for this were removed from the
+repository once the cause was found; they remain in the git history before
+the cleanup commit.
 
 ## Self-test results (`esp32-c3-board-diag`)
 

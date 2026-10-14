@@ -59,8 +59,10 @@ Schottky diode (SS14, 1N5819) in the boost output.
 
 ```
 firmware/   PlatformIO project (Arduino-ESP32 3.3.11)
-android/    Android app (Java, no third-party dependencies)
-tools/      Python scripts for BLE diagnostics from a PC (Bleak)
+  button_led.cpp   lamp firmware: wheel, button, OLED, GPS, charger (default)
+  wifi_led.cpp     phone control over the board's Wi-Fi access point
+  board_diag.cpp   board self-test
+android/    Android app for wifi_led.cpp (Java, no third-party dependencies)
 docs/       Hardware diagnostics notes
 ```
 
@@ -69,16 +71,16 @@ docs/       Hardware diagnostics notes
 Requires [PlatformIO](https://platformio.org/). From `firmware/`:
 
 ```sh
-pio run -e esp32-c3-wifi -t upload
+pio run -t upload                      # lamp firmware
+pio run -e esp32-c3-wifi -t upload     # Wi-Fi firmware for the Android app
 ```
 
 | Environment | Source | Purpose |
 |---|---|---|
-| `esp32-c3-wifi` (default) | `wifi_led.cpp` | Wi-Fi access point + TCP control, used by the app |
-| `esp32-c3-button` | `button_led.cpp` | Offline firmware: wheel, button, OLED, GPS; radio off |
+| `esp32-c3-button` (default) | `button_led.cpp` | Lamp firmware: wheel, button, OLED, GPS, charger; radio off |
+| `esp32-c3-wifi` | `wifi_led.cpp` | Wi-Fi access point + TCP control, used by the app |
 | `esp32-c3-board-diag` | `board_diag.cpp` | Board self-test over USB serial |
-| `esp32-c3-ble5`, `esp32-c3-mini` | `esp32_c3_button_led.ino` | Previous Bluetooth LE implementation (NimBLE / Bluedroid) |
-| `*-diagnostics`, `*-probe` | various | Radio investigation builds, see [docs/DIAGNOSTICS.md](docs/DIAGNOSTICS.md) |
+| `*-diagnostics` | same | Adds a USB serial report to the firmware above |
 
 `upload_port` is commented out in `platformio.ini`; PlatformIO detects the
 board automatically. Set it explicitly if several serial ports are present.
@@ -181,10 +183,6 @@ SSID and password are defined in both `firmware/wifi_led.cpp` and
 `android/.../WifiLedConnection.java`; change them together. Anyone who knows
 the password can control the lamp.
 
-The earlier BLE build exposes the same 4-byte state through GATT service
-`a7c00001-5a64-4b21-9d1c-49f39417a601`, characteristic
-`a7c00002-5a64-4b21-9d1c-49f39417a601` (read / write / notify).
-
 ## Status and known issues
 
 - The Wi-Fi firmware and app build cleanly, but end-to-end control has not
@@ -201,5 +199,4 @@ The earlier BLE build exposes the same 4-byte state through GATT service
 - ESP32-C3 Wi-Fi TX power is reduced to 8.5 dBm, a common requirement on
   compact ESP32-C3 boards.
 - Windows: in a non-UTF-8 console PlatformIO can hang while printing esptool
-  progress. Set `PYTHONIOENCODING=utf-8`. Build the Arduino 2.0.17
-  (`*-legacy`) environments from PowerShell or cmd, not Git Bash.
+  progress. Set `PYTHONIOENCODING=utf-8`.
