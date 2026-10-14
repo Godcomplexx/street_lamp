@@ -12,7 +12,9 @@
 // "Night only" lights the lamp between sunset and sunrise. Both use the clock
 // and position, which can be set by hand or come from an optional NEO-6M GPS.
 // Without a display, HOME is skipped and a short press blinks the page number.
-// All settings and the position survive power loss; the clock does not.
+// All settings and the position survive power loss. The clock survives it
+// only with an optional DS3231 RTC on the OLED's I2C bus; without one, the
+// last known time is kept as the starting point for setting the clock again.
 #include <Arduino.h>
 #include <Adafruit_NeoPixel.h>
 #include <Preferences.h>
@@ -34,6 +36,8 @@ constexpr uint8_t OLED_SCL_PIN = 10;
 constexpr uint8_t GPS_RX_PIN = 20;
 constexpr uint8_t GPS_TX_PIN = 21;
 constexpr uint32_t GPS_BAUD = 9600;
+// Optional DS3231 RTC on the same I2C bus as the OLED, powered from 3V3.
+constexpr uint8_t RTC_ADDRESS = 0x68;
 // Optional TP4056 status outputs, each through a 10 kOhm resistor: CHRG pulls
 // low while charging, STDBY when charged. Unconnected pins read "not charging".
 constexpr uint8_t CHARGING_PIN = 1;
@@ -53,6 +57,8 @@ constexpr uint32_t IDLE_MS = 60000;         // then HOME, and the OLED sleeps un
 constexpr uint8_t IDLE_CONTRAST = 8;        // always-on display while charging
 constexpr uint32_t PREVIEW_MS = 10000;      // a lamp switched off by schedule lights up while adjusted
 constexpr uint32_t SCHEDULE_MS = 10000;
+constexpr uint32_t LAST_TIME_SAVE_MS = 10 * 60000;  // flash writes stay rare
+constexpr uint32_t RTC_GPS_SYNC_MS = 3600000;       // GPS corrects the RTC hourly
 constexpr double SUNSET_ALTITUDE = -0.833;  // degrees: refraction plus the sun's radius
 // Starting point when a position is entered by hand for the first time.
 constexpr float DEFAULT_LATITUDE = 55.75f, DEFAULT_LONGITUDE = 37.62f;  // Moscow
@@ -71,7 +77,7 @@ const LightMode LIGHT_MODES[] = {LightMode::AlwaysOn, LightMode::Adaptive, Light
 constexpr uint8_t LIGHT_MODE_COUNT = 4;
 enum ClockField : uint8_t { HOUR, MINUTE, DAY, MONTH, YEAR, ZONE, CLOCK_FIELDS };
 enum LocationField : uint8_t { LATITUDE, LONGITUDE, LOCATION_FIELDS };
-enum class Source : uint8_t { None, Saved, Manual, Gps };
+enum class Source : uint8_t { None, Saved, Manual, Gps, Rtc };
 
 uint16_t hue = 0;            // 0..65535 around the circle, 0 = red
 bool white = false;
@@ -110,6 +116,10 @@ bool locationKnown = false;
 Source locationSource = Source::None;
 float latitude = 0, longitude = 0;
 bool locationSavedThisBoot = false;
+bool rtcPresent = false;
+bool rtcWriteNeeded = false;  // the clock was set by hand
+uint32_t lastRtcGpsSyncMs = 0;
+uint32_t lastTimeSaveMs = 0;
 bool sunUp = false;          // last schedule result, valid when timeKnown && locationKnown
 uint32_t adaptiveRgb = 0;    // current adaptive color, valid when timeKnown && locationKnown
 uint16_t adaptiveKelvin = 0;
@@ -181,6 +191,66 @@ int64_t buildTimeLocal() {
   return int64_t(daysFromCivil(year, month, day)) * 86400 + hour * 3600 + minute * 60 + second;
 }
 
+// ---------- DS3231 real-time clock (keeps UTC) ----------
+
+uint8_t toBcd(int value) { return uint8_t((value / 10) << 4 | value % 10); }
+int fromBcd(uint8_t value) { return (value >> 4) * 10 + (value & 0x0F); }
+
+bool rtcRead(int64_t &utc) {
+  Wire.beginTransmission(RTC_ADDRESS);
+  Wire.write(0x00);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(RTC_ADDRESS, uint8_t(7)) != 7) return false;
+  uint8_t r[7];
+  for (uint8_t &value : r) value = Wire.read();
+  Wire.beginTransmission(RTC_ADDRESS);
+  Wire.write(0x0F);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(RTC_ADDRESS, uint8_t(1)) != 1) return false;
+  if (Wire.read() & 0x80) return false;  // oscillator stopped: battery was out, time invalid
+  const int year = 2000 + fromBcd(r[6]);
+  if (year < 2024) return false;
+  utc = int64_t(daysFromCivil(year, fromBcd(r[5] & 0x1F), fromBcd(r[4]))) * 86400 +
+        fromBcd(r[2] & 0x3F) * 3600 + fromBcd(r[1]) * 60 + fromBcd(r[0] & 0x7F);
+  return true;
+}
+
+void rtcWrite(int64_t utc) {
+  const int32_t days = int32_t(utc / 86400);
+  const int seconds = int(utc % 86400);
+  int y, m, d;
+  civilFromDays(days, y, m, d);
+  Wire.beginTransmission(RTC_ADDRESS);
+  Wire.write(0x00);
+  Wire.write(toBcd(seconds % 60));
+  Wire.write(toBcd(seconds / 60 % 60));
+  Wire.write(toBcd(seconds / 3600));        // 24-hour mode
+  Wire.write(uint8_t((days + 3) % 7 + 1));  // weekday 1-7, Monday = 1
+  Wire.write(toBcd(d));
+  Wire.write(toBcd(m));
+  Wire.write(toBcd(y - 2000));
+  Wire.endTransmission();
+  // Clear the oscillator-stop flag so the time counts as valid.
+  Wire.beginTransmission(RTC_ADDRESS);
+  Wire.write(0x0F);
+  if (Wire.endTransmission(false) != 0 || Wire.requestFrom(RTC_ADDRESS, uint8_t(1)) != 1) return;
+  const uint8_t status = Wire.read();
+  Wire.beginTransmission(RTC_ADDRESS);
+  Wire.write(0x0F);
+  Wire.write(uint8_t(status & 0x7F));
+  Wire.endTransmission();
+}
+
+void setupClock(uint32_t now) {
+  Wire.beginTransmission(RTC_ADDRESS);
+  rtcPresent = Wire.endTransmission() == 0;
+  int64_t utc;
+  if (rtcPresent && rtcRead(utc)) {
+    utcAtSync = utc;
+    syncMs = now;
+    timeKnown = true;
+    timeSource = Source::Rtc;
+  }
+}
+
 double toRadians(double angle) { return angle * M_PI / 180.0; }
 double toDegrees(double angle) { return angle * 180.0 / M_PI; }
 
@@ -245,6 +315,10 @@ void readGps(uint32_t now) {
     syncMs = now - min<uint32_t>(gps.time.age(), 1000);
     timeKnown = true;
     timeSource = Source::Gps;
+    if (rtcPresent && (lastRtcGpsSyncMs == 0 || now - lastRtcGpsSyncMs >= RTC_GPS_SYNC_MS)) {
+      rtcWrite(utcAtSync + int64_t(now - syncMs) / 1000);
+      lastRtcGpsSyncMs = now;
+    }
   }
 
   if (gps.location.isUpdated() && gps.location.isValid()) {
@@ -406,7 +480,9 @@ void editClock(int steps, uint32_t now) {
     return;
   }
   if (!timeKnown) {
-    utcAtSync = buildTimeLocal() - int64_t(utcOffsetHours) * 3600;
+    // Start from the last known time if it is newer than the firmware build.
+    const int64_t built = buildTimeLocal() - int64_t(utcOffsetHours) * 3600;
+    utcAtSync = max(built, int64_t(settings.getLong64("lasttime", 0)));
     syncMs = now;
   }
   const int64_t local = localNow();
@@ -429,6 +505,7 @@ void editClock(int steps, uint32_t now) {
   syncMs = now;
   timeKnown = true;
   timeSource = Source::Manual;
+  rtcWriteNeeded = true;
 }
 
 void editLocation(int steps, int fastSteps) {
@@ -628,6 +705,7 @@ const char *sourceName(Source source) {
     case Source::Saved: return "Saved";
     case Source::Manual: return "Set by hand";
     case Source::Gps: return "From GPS";
+    case Source::Rtc: return "From RTC";
   }
   return "";
 }
@@ -916,6 +994,7 @@ void diagnosticsLoop() {
   Serial.printf("DIAG time=%d src=%u local=%lld utc_offset=%d loc=%d src=%u lat=%.4f lon=%.4f sun_up=%d lit=%d\n",
     int(timeKnown), unsigned(timeSource), (long long)(timeKnown ? localNow() : 0), utcOffsetHours,
     int(locationKnown), unsigned(locationSource), latitude, longitude, int(sunUp), int(lampLit(millis())));
+  Serial.printf("DIAG rtc=%d last_saved=%lld\n", int(rtcPresent), (long long)settings.getLong64("lasttime", 0));
   Serial.printf("DIAG adaptive=%d kelvin=%u level=%.2f rgb=%06lX\n",
     int(adaptiveActive()), adaptiveKelvin, adaptiveLevel, (unsigned long)adaptiveRgb);
 }
@@ -949,7 +1028,8 @@ void setup() {
 
   led.begin();
   showColor();
-  setupScreen();
+  setupScreen();  // also starts the I2C bus
+  setupClock(millis());
   page = homePage();
 
   lastReading = digitalRead(BUTTON_PIN);
@@ -983,7 +1063,17 @@ void loop() {
       settings.putFloat("lon", longitude);
       settings.putBool("hasloc", true);
     }
+    if (rtcWriteNeeded) {
+      if (rtcPresent) rtcWrite(utcNow());
+      rtcWriteNeeded = false;
+      lastTimeSaveMs = 0;  // store the new time below right away
+    }
     saveNeeded = false;
+  }
+
+  if (timeKnown && (lastTimeSaveMs == 0 || now - lastTimeSaveMs >= LAST_TIME_SAVE_MS)) {
+    settings.putLong64("lasttime", utcNow());
+    lastTimeSaveMs = now;
   }
 
   // Also applies schedule and preview changes within half a second.

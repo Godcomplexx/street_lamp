@@ -21,7 +21,8 @@ The lamp was made fully self-contained, without the radio:
 - **Adaptive light**: 5500 K by day → warm 2700 K after sunset → dim 2000 K
   night light from 23:00 to 05:00, following the computed solar altitude
 - **Night only** mode: on from sunset to sunrise, like a street lamp
-- **Clock and position** set by hand with the wheel, or by an optional GPS
+- **Clock and position** set by hand with the wheel, or by an optional GPS;
+  an optional DS3231 RTC keeps the time through power loss
 - **Battery power** with TP4056; the screen stays on while charging
 - Settings survive power loss
 
@@ -39,8 +40,9 @@ Pages: `HOME` (clock) → `COLOR` → `BRIGHTNESS` → `LIGHT MODE`
 (`Always on` / `Adaptive` / `Night only` / `Off`) → `CLOCK` → `LOCATION`.
 
 First setup: set the time on `CLOCK` and your coordinates on `LOCATION`
-(right-click on any web map shows them), then choose `Adaptive`. The clock
-resets on power loss and must be set again; the position is kept.
+(right-click on any web map shows them), then choose `Adaptive`. All settings
+survive power loss. The clock does too with a DS3231; without one it must be
+set again, starting from the last time saved (every 10 minutes).
 
 ## Hardware
 
@@ -50,6 +52,7 @@ resets on power loss and must be set again; the position is kept.
 | GPIO4 | Push button to `GND` |
 | GPIO6 / GPIO7 | Scroll wheel `A` / `B`, common to `GND` |
 | GPIO3 / GPIO10 | SSD1306 OLED `SDA` / `SCK`, `VDD` to `3V3` |
+| GPIO3 / GPIO10 | DS3231 RTC `SDA` / `SCL`, `VCC` to `3V3` (optional, shares the OLED bus) |
 | GPIO20 / GPIO21 | NEO-6M GPS `TX` / `RX`, `VCC` to `5V` (optional) |
 | GPIO1 / GPIO0 | TP4056 `CHRG` / `STDBY` via 10 kΩ (optional) |
 | `5V` / `G` | 5 V boost converter output when on battery |
@@ -70,7 +73,7 @@ runs the board self-test. Android app: `cd android && ./gradlew assembleDebug`.
 - **Firmware:** C++, Arduino-ESP32 3.3.11 (ESP-IDF 5.5), PlatformIO, FreeRTOS task
   for the wheel; Adafruit NeoPixel, U8g2, TinyGPSPlus; NOAA solar formulas
 - **App:** Android, Java, `WifiNetworkSpecifier` + TCP (API 26+)
-- **Hardware:** ESP32-C3, WS2812B, SSD1306, NEO-6M, TP4056
+- **Hardware:** ESP32-C3, WS2812B, SSD1306, DS3231, NEO-6M, TP4056
 
 ## Repository
 
